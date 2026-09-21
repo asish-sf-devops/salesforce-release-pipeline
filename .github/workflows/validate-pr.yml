@@ -59,17 +59,7 @@ jobs:
         if: steps.check.outputs.has_changes == 'true'
         run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
 
-      - name: Authenticate to target org
-        if: steps.check.outputs.has_changes == 'true'
-        run: |
-          sf org login jwt \
-            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
-            --jwt-key-file server.key \
-            --username ${{ secrets.SF_USERNAME }} \
-            --alias ${{ steps.vars.outputs.alias }} \
-            --instance-url ${{ vars.SF_INSTANCE_URL }}
-
-            - name: Validate against org
+      - name: Validate against org
         if: steps.check.outputs.has_changes == 'true'
         id: validate
         run: |
