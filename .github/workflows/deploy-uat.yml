@@ -23,6 +23,7 @@ jobs:
 
       - name: Generate delta package
         run: |
+          mkdir -p delta-output
           sf sgd source delta --from "${{ github.event.before }}" --to "HEAD" --output-dir delta-output
           echo "--- Components in this deploy ---"
           cat delta-output/package/package.xml
