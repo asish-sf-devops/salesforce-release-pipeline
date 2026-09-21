@@ -59,6 +59,16 @@ jobs:
         if: steps.check.outputs.has_changes == 'true'
         run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
 
+      - name: Authenticate to target org
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          sf org login jwt \
+            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
+            --jwt-key-file server.key \
+            --username ${{ secrets.SF_USERNAME }} \
+            --alias ${{ steps.vars.outputs.alias }} \
+            --instance-url ${{ vars.SF_INSTANCE_URL }}
+
       - name: Validate against org
         if: steps.check.outputs.has_changes == 'true'
         id: validate
@@ -100,6 +110,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fsSync = require('fs');
             const marker = '<!-- SF_VALIDATION_COMMENT -->';
             const hasChanges = '${{ steps.check.outputs.has_changes }}';
             const jobId = '${{ steps.validate.outputs.job_id }}';
@@ -113,7 +124,21 @@ jobs:
             } else if (outcome === 'success') {
               body = `${marker}\n✅ Validation succeeded against **${alias}**.\n\n<!-- SF_VALIDATION_ID:${alias}:${jobId}:${headSha} -->\nValidation Job ID: \`${jobId}\`\n_Commit: ${headSha}_`;
             } else {
-              body = `${marker}\n❌ Validation failed against **${alias}**. Check the workflow run for details.\n\n_Commit: ${headSha}_`;
+              let details = '';
+              try {
+                const result = JSON.parse(fsSync.readFileSync('validate-result.json', 'utf8')).result;
+                const compFailures = [].concat(result?.details?.componentFailures || []).filter(Boolean);
+                const testFailures = [].concat(result?.details?.runTestResult?.failures || []).filter(Boolean);
+                if (compFailures.length) {
+                  details += '\n\n**Component errors:**\n```\n' + compFailures.map(f => `[${f.problemType}] ${f.fileName} (line ${f.lineNumber}): ${f.problem}`).join('\n') + '\n```';
+                }
+                if (testFailures.length) {
+                  details += '\n\n**Test failures:**\n```\n' + testFailures.map(f => `${f.name}.${f.methodName}: ${f.message}`).join('\n') + '\n```';
+                }
+              } catch (e) {
+                details = '\n\n_(Could not read detailed error output — check the workflow log.)_';
+              }
+              body = `${marker}\n❌ Validation failed against **${alias}**.${details}\n\n_Commit: ${headSha}_`;
             }
 
             const { data: comments } = await github.rest.issues.listComments({
