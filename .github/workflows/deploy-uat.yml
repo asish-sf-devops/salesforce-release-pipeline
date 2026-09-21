@@ -18,10 +18,53 @@ jobs:
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
 
+      - name: Find associated PR and extract validation Job ID
+        id: findpr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+            });
+            if (prs.length === 0) { core.setOutput('job_id', ''); return; }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prs[0].number,
+            });
+            const found = comments.map(c => c.body.match(/<!-- SF_VALIDATION_ID:uat:(\w+):(\w+) -->/)).find(Boolean);
+            core.setOutput('job_id', found ? found[1] : '');
+
+      - name: Write JWT key to file
+        run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      - name: Authenticate to UAT org
+        run: |
+          sf org login jwt \
+            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
+            --jwt-key-file server.key \
+            --username ${{ secrets.SF_USERNAME }} \
+            --alias uat \
+            --instance-url ${{ vars.SF_INSTANCE_URL }}
+
+      - name: Attempt quick deploy
+        id: quickdeploy
+        if: steps.findpr.outputs.job_id != ''
+        run: |
+          set +e
+          sf project deploy quick --job-id "${{ steps.findpr.outputs.job_id }}" --target-org uat
+          echo "quick_exit=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
       - name: Install sfdx-git-delta plugin
+        if: steps.quickdeploy.outputs.quick_exit != '0'
         run: echo y | sf plugins install sfdx-git-delta
 
       - name: Generate delta package
+        if: steps.quickdeploy.outputs.quick_exit != '0'
         run: |
           mkdir -p delta-output
           sf sgd source delta --from "${{ github.event.before }}" --to "HEAD" --output-dir delta-output
@@ -31,6 +74,7 @@ jobs:
           cat delta-output/destructiveChanges/destructiveChanges.xml
 
       - name: Check if there's anything to deploy
+        if: steps.quickdeploy.outputs.quick_exit != '0'
         id: check
         run: |
           if grep -q "<types>" delta-output/package/package.xml || grep -q "<types>" delta-output/destructiveChanges/destructiveChanges.xml; then
@@ -39,22 +83,8 @@ jobs:
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Write JWT key to file
-        if: steps.check.outputs.has_changes == 'true'
-        run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
-
-      - name: Authenticate to UAT org
-        if: steps.check.outputs.has_changes == 'true'
-        run: |
-          sf org login jwt \
-            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
-            --jwt-key-file server.key \
-            --username ${{ secrets.SF_USERNAME }} \
-            --alias uat \
-            --instance-url ${{ vars.SF_INSTANCE_URL }}
-
-      - name: Deploy delta to UAT
-        if: steps.check.outputs.has_changes == 'true'
+      - name: Deploy delta to UAT (fallback)
+        if: steps.quickdeploy.outputs.quick_exit != '0' && steps.check.outputs.has_changes == 'true'
         run: |
           sf project deploy start \
             --manifest delta-output/package/package.xml \
