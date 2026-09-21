@@ -69,19 +69,41 @@ jobs:
             --alias ${{ steps.vars.outputs.alias }} \
             --instance-url ${{ vars.SF_INSTANCE_URL }}
 
-      - name: Validate against org
+            - name: Validate against org
         if: steps.check.outputs.has_changes == 'true'
         id: validate
         run: |
+          set +e
           sf project deploy validate \
             --manifest delta-output/package/package.xml \
             --post-destructive-changes delta-output/destructiveChanges/destructiveChanges.xml \
             --target-org ${{ steps.vars.outputs.alias }} \
             --test-level ${{ vars.SF_TEST_LEVEL }} \
             --json > validate-result.json
+          VALIDATE_EXIT=$?
+          set -e
+
+          echo "--- Full raw result (fallback if summary below is empty) ---"
           cat validate-result.json
-          JOB_ID=$(node -pe "JSON.parse(require('fs').readFileSync('validate-result.json')).result.id")
+
+          echo "--- Component errors (if any) ---"
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync('validate-result.json')).result;
+            const list = [].concat(r?.details?.componentFailures || []).filter(Boolean);
+            list.forEach(f => console.log(\`[\${f.problemType}] \${f.fileName} (line \${f.lineNumber}, col \${f.columnNumber}): \${f.problem}\`));
+          "
+
+          echo "--- Apex test failures (if any) ---"
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync('validate-result.json')).result;
+            const list = [].concat(r?.details?.runTestResult?.failures || []).filter(Boolean);
+            list.forEach(f => { console.log(\`\${f.name}.\${f.methodName}: \${f.message}\`); if (f.stackTrace) console.log(f.stackTrace); });
+          "
+
+          JOB_ID=$(node -pe "JSON.parse(require('fs').readFileSync('validate-result.json')).result.id || ''")
           echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+          exit $VALIDATE_EXIT
 
       - name: Post validation result as PR comment
         if: always()
