@@ -10,15 +10,41 @@ jobs:
     runs-on: ubuntu-latest
     environment: PROD
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
 
+      - name: Install sfdx-git-delta plugin
+        run: echo y | sf plugins install sfdx-git-delta
+
+      - name: Generate delta package
+        run: |
+          mkdir -p delta-output
+          sf sgd source delta --from "${{ github.event.before }}" --to "HEAD" --output-dir delta-output
+          echo "--- Components in this deploy ---"
+          cat delta-output/package/package.xml
+          echo "--- Deletions in this deploy ---"
+          cat delta-output/destructiveChanges/destructiveChanges.xml
+
+      - name: Check if there's anything to deploy
+        id: check
+        run: |
+          if grep -q "<types>" delta-output/package/package.xml || grep -q "<types>" delta-output/destructiveChanges/destructiveChanges.xml; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Write JWT key to file
+        if: steps.check.outputs.has_changes == 'true'
         run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
 
       - name: Authenticate to Prod org
+        if: steps.check.outputs.has_changes == 'true'
         run: |
           sf org login jwt \
             --client-id ${{ secrets.SF_CONSUMER_KEY }} \
@@ -27,8 +53,14 @@ jobs:
             --alias prod \
             --instance-url ${{ vars.SF_INSTANCE_URL }}
 
-      - name: Deploy to Prod
-        run: sf project deploy start --target-org prod --test-level ${{ vars.SF_TEST_LEVEL }}
+      - name: Deploy delta to Prod
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          sf project deploy start \
+            --manifest delta-output/package/package.xml \
+            --post-destructive-changes delta-output/destructiveChanges/destructiveChanges.xml \
+            --target-org prod \
+            --test-level ${{ vars.SF_TEST_LEVEL }}
 
       - name: Clean up key file
         if: always()
